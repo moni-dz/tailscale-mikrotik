@@ -83,6 +83,12 @@ FROM --platform=$BUILDPLATFORM debian:bookworm-slim AS devuan-rootfs
 
 ARG DEVUAN_KEYRING_VERSION="2025.08.09"
 
+# Some CI runners have a broken/blackholed IPv6 route, making every apt/wget
+# connection try IPv6 first, stall, then fall back to IPv4 - can turn a 5min
+# debootstrap into a 20min timeout. Force IPv4 everywhere in this stage.
+RUN echo 'Acquire::ForceIPv4 "true";' > /etc/apt/apt.conf.d/99force-ipv4 && \
+    echo "inet4-only = on" > /etc/wgetrc
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
       debootstrap qemu-user-static ca-certificates curl && \
     rm -rf /var/lib/apt/lists/*
@@ -96,6 +102,8 @@ RUN debootstrap --arch=armel \
       http://deb.devuan.org/merged /usr/share/debootstrap/scripts/trixie
 
 RUN cp /etc/resolv.conf /rootfs/etc/resolv.conf && \
+    mkdir -p /rootfs/etc/apt/apt.conf.d && \
+    echo 'Acquire::ForceIPv4 "true";' > /rootfs/etc/apt/apt.conf.d/99force-ipv4 && \
     chroot /rootfs apt-get update && \
     chroot /rootfs apt-get install -y --no-install-recommends \
       ca-certificates iptables iproute2 bash openssh-server procps && \
