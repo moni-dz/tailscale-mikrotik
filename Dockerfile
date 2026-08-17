@@ -49,9 +49,11 @@ ENV VERSION_SHORT=$VERSION_SHORT
 ARG VERSION_GIT_HASH=""
 ENV VERSION_GIT_HASH=$VERSION_GIT_HASH
 ARG TARGETARCH
-ARG TARGETVARIANT
+# 5 = soft-float, no VFP/NEON instructions. Some ARM routers (e.g. MikroTik
+# hAP be lite) SIGILL on GOARM=7's hardware-float instructions.
+ARG GOARM="5"
 
-RUN GOARCH=$TARGETARCH GOARM=${TARGETVARIANT#v} go build -o /go/bin/ -ldflags="-w -s\
+RUN GOARCH=$TARGETARCH GOARM=$GOARM go build -o /go/bin/ -ldflags="-w -s\
       -X tailscale.com/version.Long=$VERSION_LONG \
       -X tailscale.com/version.Short=$VERSION_SHORT \
       -X tailscale.com/version.GitCommit=$VERSION_GIT_HASH" \
