@@ -99,10 +99,18 @@ RUN echo "inet4-only = on" > /etc/wgetrc
 RUN curl -sL "http://deb.devuan.org/merged/pool/DEVUAN/main/d/devuan-keyring/devuan-keyring_${DEVUAN_KEYRING_VERSION}_all.deb" -o /tmp/dk.deb && \
     dpkg-deb -x /tmp/dk.deb /tmp/dkx
 
-RUN debootstrap --arch=armel \
-      --keyring=/tmp/dkx/usr/share/keyrings/devuan-archive-keyring.gpg \
-      --variant=minbase excalibur /rootfs \
-      http://deb.devuan.org/merged /usr/share/debootstrap/scripts/trixie
+# Retry on transient mirror hiccups - occasionally 1-2 packages fail to
+# fetch even with IPv4 forced. `for` swallows individual failures, so
+# explicitly check the result afterward.
+RUN for i in 1 2 3; do \
+      rm -rf /rootfs && \
+      debootstrap --arch=armel \
+        --keyring=/tmp/dkx/usr/share/keyrings/devuan-archive-keyring.gpg \
+        --variant=minbase excalibur /rootfs \
+        http://deb.devuan.org/merged /usr/share/debootstrap/scripts/trixie \
+      && break || sleep 10; \
+    done; \
+    test -x /rootfs/usr/bin/dpkg
 
 RUN cp /etc/resolv.conf /rootfs/etc/resolv.conf && \
     mkdir -p /rootfs/etc/apt/apt.conf.d && \
