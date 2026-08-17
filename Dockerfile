@@ -23,6 +23,10 @@ FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS build-env
 
 WORKDIR /go/src/tailscale
 
+# This host's toolchain crashes intermittently (cmd/compile SSA race) under
+# default parallelism. Serialize compilation - slower, reliable.
+ENV GOFLAGS=-p=1
+
 COPY tailscale/go.mod tailscale/go.sum ./
 RUN go mod download
 
@@ -51,7 +55,14 @@ ENV VERSION_GIT_HASH=$VERSION_GIT_HASH
 ARG TARGETARCH
 ARG GOARM="5"
 
-RUN GOARCH=$TARGETARCH GOARM=$GOARM go build -o /go/bin/ -ldflags="-w -s\
+# Trim build size by dropping features unused by a headless router subnet
+# router/exit-node setup (desktop/GUI, other-OS integrations, telemetry,
+# debug tooling). Keeps: routing, DNS, netstack, exit-node, portmapper,
+# OAuth/identity-federation authkeys, tailnet lock. See `go run
+# ./cmd/featuretags -list` in the tailscale tree for what each one does.
+ARG TS_OMIT_TAGS="ts_omit_acme,ts_omit_appconnectors,ts_omit_aws,ts_omit_bird,ts_omit_cachenetmap,ts_omit_captiveportal,ts_omit_capture,ts_omit_cliconndiag,ts_omit_cloud,ts_omit_colorable,ts_omit_completion,ts_omit_completion_scripts,ts_omit_conn25,ts_omit_dbus,ts_omit_debug,ts_omit_debugeventbus,ts_omit_debugportmapper,ts_omit_desktop_sessions,ts_omit_doctor,ts_omit_drive,ts_omit_flashappliance,ts_omit_gro,ts_omit_kube,ts_omit_linkspeed,ts_omit_linuxdnsfight,ts_omit_netlog,ts_omit_networkmanager,ts_omit_outboundproxy,ts_omit_portlist,ts_omit_posture,ts_omit_qrcodes,ts_omit_remoteconfig,ts_omit_resolved,ts_omit_runtimemetrics,ts_omit_sdnotify,ts_omit_serve,ts_omit_serviceclientprefs,ts_omit_ssh,ts_omit_synology,ts_omit_syslog,ts_omit_systray,ts_omit_taildrop,ts_omit_tap,ts_omit_tpm,ts_omit_tundevstats,ts_omit_usermetrics,ts_omit_webbrowser,ts_omit_webclient"
+
+RUN GOARCH=$TARGETARCH GOARM=$GOARM go build -o /go/bin/ -tags "$TS_OMIT_TAGS" -ldflags="-w -s\
       -X tailscale.com/version.Long=$VERSION_LONG \
       -X tailscale.com/version.Short=$VERSION_SHORT \
       -X tailscale.com/version.GitCommit=$VERSION_GIT_HASH" \
