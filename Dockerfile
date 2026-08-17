@@ -86,12 +86,15 @@ ARG DEVUAN_KEYRING_VERSION="2025.08.09"
 # Some CI runners have a broken/blackholed IPv6 route, making every apt/wget
 # connection try IPv6 first, stall, then fall back to IPv4 - can turn a 5min
 # debootstrap into a 20min timeout. Force IPv4 everywhere in this stage.
-RUN echo 'Acquire::ForceIPv4 "true";' > /etc/apt/apt.conf.d/99force-ipv4 && \
-    echo "inet4-only = on" > /etc/wgetrc
+RUN echo 'Acquire::ForceIPv4 "true";' > /etc/apt/apt.conf.d/99force-ipv4
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
       debootstrap qemu-user-static ca-certificates curl && \
     rm -rf /var/lib/apt/lists/*
+
+# wget's own postinst must run first - writing this earlier collides with
+# the conffile it installs.
+RUN echo "inet4-only = on" > /etc/wgetrc
 
 RUN curl -sL "http://deb.devuan.org/merged/pool/DEVUAN/main/d/devuan-keyring/devuan-keyring_${DEVUAN_KEYRING_VERSION}_all.deb" -o /tmp/dk.deb && \
     dpkg-deb -x /tmp/dk.deb /tmp/dkx
