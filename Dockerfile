@@ -26,6 +26,8 @@ WORKDIR /go/src/tailscale
 COPY tailscale/go.mod tailscale/go.sum ./
 RUN go mod download
 
+RUN apk add --no-cache upx
+
 # Pre-build some stuff before the following COPY line invalidates the Docker cache.
 RUN go install \
     github.com/aws/aws-sdk-go-v2/aws \
@@ -47,8 +49,6 @@ ENV VERSION_SHORT=$VERSION_SHORT
 ARG VERSION_GIT_HASH=""
 ENV VERSION_GIT_HASH=$VERSION_GIT_HASH
 ARG TARGETARCH
-# 5 = soft-float, no VFP/NEON instructions. Some ARM routers (e.g. MikroTik
-# hAP be lite) SIGILL on GOARM=7's hardware-float instructions.
 ARG GOARM="5"
 
 RUN GOARCH=$TARGETARCH GOARM=$GOARM go build -o /go/bin/ -ldflags="-w -s\
@@ -57,7 +57,9 @@ RUN GOARCH=$TARGETARCH GOARM=$GOARM go build -o /go/bin/ -ldflags="-w -s\
       -X tailscale.com/version.GitCommit=$VERSION_GIT_HASH" \
       -v ./cmd/tailscale ./cmd/tailscaled
 
-FROM alpine:3.22
+RUN upx /go/bin/tailscale && upx /go/bin/tailscaled
+
+FROM alpine:3.22 AS final
 
 RUN apk add --no-cache ca-certificates iptables iptables-legacy iproute2 bash openssh curl jq
 
@@ -73,4 +75,69 @@ COPY tailscale.sh /usr/local/bin
 
 EXPOSE 22
 CMD ["/usr/local/bin/tailscale.sh"]
+
+# ---------------------------------------------------------------------------
+# arm/v7 (soft-float): bootstrap Devuan excalibur armel rootfs. Debian/Alpine
+# dropped soft-float ARM32 (armel) entirely; Devuan still ships it current.
+FROM --platform=$BUILDPLATFORM debian:bookworm-slim AS devuan-rootfs
+
+ARG DEVUAN_KEYRING_VERSION="2025.08.09"
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      debootstrap qemu-user-static ca-certificates curl && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN curl -sL "http://deb.devuan.org/merged/pool/DEVUAN/main/d/devuan-keyring/devuan-keyring_${DEVUAN_KEYRING_VERSION}_all.deb" -o /tmp/dk.deb && \
+    dpkg-deb -x /tmp/dk.deb /tmp/dkx
+
+RUN debootstrap --arch=armel \
+      --keyring=/tmp/dkx/usr/share/keyrings/devuan-archive-keyring.gpg \
+      --variant=minbase excalibur /rootfs \
+      http://deb.devuan.org/merged /usr/share/debootstrap/scripts/trixie
+
+RUN cp /etc/resolv.conf /rootfs/etc/resolv.conf && \
+    chroot /rootfs apt-get update && \
+    chroot /rootfs apt-get install -y --no-install-recommends \
+      ca-certificates iptables iproute2 bash openssh-server procps && \
+    chroot /rootfs apt-get clean && \
+    rm -rf /rootfs/var/lib/apt/lists/* /rootfs/var/cache/apt/* /rootfs/etc/resolv.conf
+
+RUN rm -rf \
+      /rootfs/var/lib/dpkg \
+      /rootfs/var/lib/apt \
+      /rootfs/usr/share/doc \
+      /rootfs/usr/share/man \
+      /rootfs/usr/share/info \
+      /rootfs/usr/share/locale \
+      /rootfs/usr/share/i18n \
+      /rootfs/usr/lib/*/perl* \
+      /rootfs/usr/lib/*/perl-base \
+      /rootfs/usr/share/perl5 \
+      /rootfs/usr/share/perl \
+      /rootfs/usr/bin/perl* \
+      /rootfs/usr/bin/apt* \
+      /rootfs/usr/lib/apt \
+      /rootfs/etc/apt \
+      /rootfs/usr/lib/*/gconv \
+      /rootfs/usr/lib/*/libapt-pkg.so* \
+      /rootfs/usr/lib/*/libapt-private.so* \
+      /rootfs/usr/lib/*/libdb-5.3.so*
+
+RUN ln -sf /usr/sbin/iptables-legacy /rootfs/usr/local/bin/iptables && \
+    ln -sf /usr/sbin/ip6tables-legacy /rootfs/usr/local/bin/ip6tables
+
+# openssh-server postinst already generated host keys.
+COPY sshd_config.devuan /rootfs/etc/ssh/sshd_config
+COPY tailscale.sh /rootfs/usr/local/bin/
+
+FROM scratch AS final-v7
+COPY --from=devuan-rootfs /rootfs/ /
+COPY --from=build-env /go/bin/* /usr/local/bin/
+
+EXPOSE 22
+CMD ["/usr/local/bin/tailscale.sh"]
+
+# ---------------------------------------------------------------------------
+ARG TARGETVARIANT
+FROM final${TARGETVARIANT:+-v7}
 
