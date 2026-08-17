@@ -27,7 +27,7 @@
 # https://mikrotik.com/products/matrix
 #
 PLATFORM="linux/arm64"
-TAILSCALE_VERSION=1.96.3
+TAILSCALE_VERSION=1.102.2
 VERSION=0.1.40
 
 set -eu
@@ -39,7 +39,7 @@ then
     git -c advice.detachedHead=false clone https://github.com/tailscale/tailscale.git --branch v$TAILSCALE_VERSION
 fi
 
-TS_USE_TOOLCHAIN="Y"
+export TS_USE_TOOLCHAIN="Y"
 cd tailscale && eval $(./build_dist.sh shellvars) && cd ..
 
 docker buildx build \
