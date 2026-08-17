@@ -2,3 +2,5 @@
 tailscale/
 build-multi.sh
 tailscale.tar
+tailscale-armv5.tar
+*.tar
