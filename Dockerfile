@@ -151,7 +151,60 @@ RUN rm -rf \
       /rootfs/usr/lib/*/gconv \
       /rootfs/usr/lib/*/libapt-pkg.so* \
       /rootfs/usr/lib/*/libapt-private.so* \
-      /rootfs/usr/lib/*/libdb-5.3.so*
+      /rootfs/usr/lib/*/libdb-5.3.so* \
+      /rootfs/usr/share/zoneinfo \
+      /rootfs/usr/share/terminfo \
+      /rootfs/usr/share/common-licenses \
+      /rootfs/usr/share/bash-completion \
+      /rootfs/usr/share/lintian \
+      /rootfs/usr/share/insserv \
+      /rootfs/usr/share/keyrings \
+      /rootfs/usr/share/gcc \
+      /rootfs/usr/share/polkit-1 \
+      /rootfs/usr/share/dpkg \
+      /rootfs/usr/share/debconf \
+      /rootfs/usr/bin/dpkg* \
+      /rootfs/usr/bin/debconf* \
+      /rootfs/usr/bin/deb-systemd* \
+      /rootfs/usr/bin/ucf* \
+      /rootfs/usr/bin/gpgv \
+      /rootfs/usr/bin/openssl \
+      /rootfs/usr/sbin/dpkg-preconfigure \
+      /rootfs/usr/sbin/dpkg-reconfigure \
+      /rootfs/usr/sbin/update-alternatives \
+      /rootfs/usr/lib/openssh/ssh-keysign \
+      /rootfs/usr/lib/openssh/ssh-pkcs11-helper \
+      /rootfs/usr/lib/openssh/ssh-sk-helper \
+      /rootfs/usr/bin/ssh \
+      /rootfs/usr/bin/ssh-add \
+      /rootfs/usr/bin/ssh-agent \
+      /rootfs/usr/bin/ssh-argv0 \
+      /rootfs/usr/bin/ssh-copy-id \
+      /rootfs/usr/bin/ssh-keygen \
+      /rootfs/usr/bin/ssh-keyscan \
+      /rootfs/usr/bin/scp \
+      /rootfs/usr/bin/sftp \
+      /rootfs/usr/sbin/tc \
+      /rootfs/usr/sbin/bridge \
+      /rootfs/usr/sbin/devlink \
+      /rootfs/usr/sbin/tipc \
+      /rootfs/usr/sbin/dcb \
+      /rootfs/usr/sbin/vdpa \
+      /rootfs/usr/sbin/genl \
+      /rootfs/usr/sbin/arpd \
+      /rootfs/usr/sbin/rtmon \
+      /rootfs/usr/sbin/rtacct \
+      /rootfs/usr/sbin/iptables-apply \
+      /rootfs/usr/sbin/ip6tables-apply \
+      /rootfs/usr/bin/ss \
+      /rootfs/usr/bin/nstat \
+      /rootfs/usr/bin/lnstat \
+      /rootfs/usr/bin/rdma \
+      /rootfs/usr/bin/routel \
+      /rootfs/usr/bin/rtstat
+
+# rbash was installed as a full duplicate binary (1.2MB), not the usual symlink to bash.
+RUN rm -f /rootfs/usr/bin/rbash && ln -s bash /rootfs/usr/bin/rbash
 
 RUN ln -sf /usr/sbin/iptables-legacy /rootfs/usr/local/bin/iptables && \
     ln -sf /usr/sbin/ip6tables-legacy /rootfs/usr/local/bin/ip6tables
