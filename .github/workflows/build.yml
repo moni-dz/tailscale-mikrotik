@@ -8,7 +8,6 @@ on:
       - build.sh
       - tailscale.sh
       - sshd_config
-      - sshd_config.devuan
       - .github/workflows/build.yml
   workflow_dispatch:
 

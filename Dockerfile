@@ -55,11 +55,6 @@ ENV VERSION_GIT_HASH=$VERSION_GIT_HASH
 ARG TARGETARCH
 ARG GOARM="5"
 
-# Trim build size by dropping features unused by a headless router subnet
-# router/exit-node setup (desktop/GUI, other-OS integrations, telemetry,
-# debug tooling). Keeps: routing, DNS, netstack, exit-node, portmapper,
-# OAuth/identity-federation authkeys, tailnet lock. See `go run
-# ./cmd/featuretags -list` in the tailscale tree for what each one does.
 ARG TS_OMIT_TAGS="ts_omit_acme,ts_omit_appconnectors,ts_omit_aws,ts_omit_bird,ts_omit_cachenetmap,ts_omit_captiveportal,ts_omit_capture,ts_omit_cliconndiag,ts_omit_cloud,ts_omit_colorable,ts_omit_completion,ts_omit_completion_scripts,ts_omit_conn25,ts_omit_dbus,ts_omit_debug,ts_omit_debugeventbus,ts_omit_debugportmapper,ts_omit_desktop_sessions,ts_omit_doctor,ts_omit_drive,ts_omit_flashappliance,ts_omit_gro,ts_omit_kube,ts_omit_linkspeed,ts_omit_linuxdnsfight,ts_omit_netlog,ts_omit_networkmanager,ts_omit_outboundproxy,ts_omit_portlist,ts_omit_posture,ts_omit_qrcodes,ts_omit_remoteconfig,ts_omit_resolved,ts_omit_runtimemetrics,ts_omit_sdnotify,ts_omit_serve,ts_omit_serviceclientprefs,ts_omit_ssh,ts_omit_synology,ts_omit_syslog,ts_omit_systray,ts_omit_taildrop,ts_omit_tap,ts_omit_tpm,ts_omit_tundevstats,ts_omit_usermetrics,ts_omit_webbrowser,ts_omit_webclient"
 
 RUN GOARCH=$TARGETARCH GOARM=$GOARM go build -o /go/bin/ -tags "$TS_OMIT_TAGS" -ldflags="-w -s\
@@ -87,134 +82,112 @@ COPY tailscale.sh /usr/local/bin
 EXPOSE 22
 CMD ["/usr/local/bin/tailscale.sh"]
 
-# ---------------------------------------------------------------------------
-# arm/v7 (soft-float): bootstrap Devuan excalibur armel rootfs. Debian/Alpine
-# dropped soft-float ARM32 (armel) entirely; Devuan still ships it current.
-FROM --platform=$BUILDPLATFORM debian:bookworm-slim AS devuan-rootfs
+# musl.cc's own HTTP server is too flaky for CI-scale downloads (100MB tarball
+# routinely stalls/times out on GitHub Actions runners). Pull the identical
+# toolchain from musl.cc's own published Docker image instead - registry
+# pulls are cached/mirrored infra, not a single small server.
+FROM --platform=$BUILDPLATFORM muslcc/x86_64:arm-linux-musleabi AS musl-cross
 
-ARG DEVUAN_KEYRING_VERSION="2025.08.09"
-
-# Some CI runners have a broken/blackholed IPv6 route, making every apt/wget
-# connection try IPv6 first, stall, then fall back to IPv4 - can turn a 5min
-# debootstrap into a 20min timeout. Force IPv4 everywhere in this stage.
-RUN echo 'Acquire::ForceIPv4 "true";' > /etc/apt/apt.conf.d/99force-ipv4
+FROM --platform=$BUILDPLATFORM debian:bookworm-slim AS musl-rootfs
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      debootstrap qemu-user-static ca-certificates curl && \
+      curl ca-certificates build-essential bc bison flex qemu-user-static && \
     rm -rf /var/lib/apt/lists/*
 
-# wget's own postinst must run first - writing this earlier collides with
-# the conffile it installs.
-RUN echo "inet4-only = on" > /etc/wgetrc
+COPY --from=musl-cross / /opt/arm-linux-musleabi-cross/
 
-RUN curl -sL "http://deb.devuan.org/merged/pool/DEVUAN/main/d/devuan-keyring/devuan-keyring_${DEVUAN_KEYRING_VERSION}_all.deb" -o /tmp/dk.deb && \
-    dpkg-deb -x /tmp/dk.deb /tmp/dkx
+# This image's /bin holds the cross toolchain under unprefixed names (gcc,
+# ar, ld, ...) alongside its own busybox - it's meant to be run as a whole
+# environment, not layered onto another distro's PATH. Adding it to PATH
+# directly shadows the host's own gcc/etc, breaking any host-tool build step
+# (e.g. busybox's HOSTCC). Symlink just the compiler/binutils names into
+# their arm-linux-musleabi- prefixed form instead, so CROSS_COMPILE=
+# arm-linux-musleabi- finds them while plain `gcc` still resolves to Debian's.
+RUN mkdir -p /opt/arm-linux-musleabi-cross/prefixed-bin && \
+    for t in gcc g++ c++ cpp ar as ld ld.bfd ld.gold nm ranlib strip \
+             objcopy objdump readelf addr2line size elfedit dwp \
+             gcc-ar gcc-nm gcc-ranlib gcov gcov-dump gcov-tool gprof strings; do \
+      ln -s "../bin/$t" "/opt/arm-linux-musleabi-cross/prefixed-bin/arm-linux-musleabi-$t"; \
+    done
+ENV PATH="/opt/arm-linux-musleabi-cross/prefixed-bin:${PATH}"
+ENV CROSS="arm-linux-musleabi-"
 
-# Retry on transient mirror hiccups - occasionally 1-2 packages fail to
-# fetch even with IPv4 forced. `for` swallows individual failures, so
-# explicitly check the result afterward.
-RUN for i in 1 2 3; do \
-      rm -rf /rootfs && \
-      debootstrap --arch=armel \
-        --keyring=/tmp/dkx/usr/share/keyrings/devuan-archive-keyring.gpg \
-        --variant=minbase excalibur /rootfs \
-        http://deb.devuan.org/merged /usr/share/debootstrap/scripts/trixie \
-      && break || sleep 10; \
-    done; \
-    test -x /rootfs/usr/bin/dpkg
+# --- BusyBox: shell (ash), coreutils, ip, chpasswd, sysctl - one static binary.
+# Downloaded to a file first, not piped straight into tar: a piped download
+# that gets truncated mid-stream just looks like a corrupt archive to tar,
+# with no retry. --retry lets curl actually recover from that.
+ARG BUSYBOX_VERSION="1.36.1"
+RUN mkdir -p /usr/src && \
+    curl --fail --retry 5 --retry-all-errors -sL "https://busybox.net/downloads/busybox-${BUSYBOX_VERSION}.tar.bz2" -o /tmp/busybox.tar.bz2 && \
+    tar -xj -C /usr/src -f /tmp/busybox.tar.bz2 && rm /tmp/busybox.tar.bz2
+WORKDIR /usr/src/busybox-1.36.1
+RUN make ARCH=arm CROSS_COMPILE=${CROSS} defconfig && \
+    sed -i 's/# CONFIG_STATIC is not set/CONFIG_STATIC=y/' .config && \
+    yes '' | make ARCH=arm CROSS_COMPILE=${CROSS} oldconfig && \
+    make ARCH=arm CROSS_COMPILE=${CROSS} -j"$(nproc)" busybox
 
-RUN cp /etc/resolv.conf /rootfs/etc/resolv.conf && \
-    mkdir -p /rootfs/etc/apt/apt.conf.d && \
-    echo 'Acquire::ForceIPv4 "true";' > /rootfs/etc/apt/apt.conf.d/99force-ipv4 && \
-    chroot /rootfs apt-get update && \
-    chroot /rootfs apt-get install -y --no-install-recommends \
-      ca-certificates iptables iproute2 bash openssh-server procps && \
-    chroot /rootfs apt-get clean && \
-    rm -rf /rootfs/var/lib/apt/lists/* /rootfs/var/cache/apt/* /rootfs/etc/resolv.conf
+# --- Dropbear: sshd. Far smaller and simpler than OpenSSH for a musl/embedded
+# target - no PAM, no autotools dependency chain, self-contained crypto.
+ARG DROPBEAR_VERSION="2025.88"
+RUN curl --fail --retry 5 --retry-all-errors -sL "https://matt.ucc.asn.au/dropbear/releases/dropbear-${DROPBEAR_VERSION}.tar.bz2" -o /tmp/dropbear.tar.bz2 && \
+    tar -xj -C /usr/src -f /tmp/dropbear.tar.bz2 && rm /tmp/dropbear.tar.bz2
+WORKDIR /usr/src/dropbear-2025.88
+RUN CC=${CROSS}gcc ./configure --host=arm-linux-musleabi --enable-static \
+      --disable-zlib --disable-utmp --disable-utmpx --disable-wtmp --disable-wtmpx \
+      --disable-lastlog --disable-loginfunc --disable-pututline --disable-pututxline \
+      LDFLAGS=-static && \
+    make PROGRAMS="dropbear dropbearkey" STATIC=1 -j"$(nproc)"
 
-RUN rm -rf \
-      /rootfs/var/lib/dpkg \
-      /rootfs/var/lib/apt \
-      /rootfs/usr/share/doc \
-      /rootfs/usr/share/man \
-      /rootfs/usr/share/info \
-      /rootfs/usr/share/locale \
-      /rootfs/usr/share/i18n \
-      /rootfs/usr/lib/*/perl* \
-      /rootfs/usr/lib/*/perl-base \
-      /rootfs/usr/share/perl5 \
-      /rootfs/usr/share/perl \
-      /rootfs/usr/bin/perl* \
-      /rootfs/usr/bin/apt* \
-      /rootfs/usr/lib/apt \
-      /rootfs/etc/apt \
-      /rootfs/usr/lib/*/gconv \
-      /rootfs/usr/lib/*/libapt-pkg.so* \
-      /rootfs/usr/lib/*/libapt-private.so* \
-      /rootfs/usr/lib/*/libdb-5.3.so* \
-      /rootfs/usr/share/zoneinfo \
-      /rootfs/usr/share/terminfo \
-      /rootfs/usr/share/common-licenses \
-      /rootfs/usr/share/bash-completion \
-      /rootfs/usr/share/lintian \
-      /rootfs/usr/share/insserv \
-      /rootfs/usr/share/keyrings \
-      /rootfs/usr/share/gcc \
-      /rootfs/usr/share/polkit-1 \
-      /rootfs/usr/share/dpkg \
-      /rootfs/usr/share/debconf \
-      /rootfs/usr/bin/dpkg* \
-      /rootfs/usr/bin/debconf* \
-      /rootfs/usr/bin/deb-systemd* \
-      /rootfs/usr/bin/ucf* \
-      /rootfs/usr/bin/gpgv \
-      /rootfs/usr/bin/openssl \
-      /rootfs/usr/sbin/dpkg-preconfigure \
-      /rootfs/usr/sbin/dpkg-reconfigure \
-      /rootfs/usr/sbin/update-alternatives \
-      /rootfs/usr/lib/openssh/ssh-keysign \
-      /rootfs/usr/lib/openssh/ssh-pkcs11-helper \
-      /rootfs/usr/lib/openssh/ssh-sk-helper \
-      /rootfs/usr/bin/ssh \
-      /rootfs/usr/bin/ssh-add \
-      /rootfs/usr/bin/ssh-agent \
-      /rootfs/usr/bin/ssh-argv0 \
-      /rootfs/usr/bin/ssh-copy-id \
-      /rootfs/usr/bin/ssh-keygen \
-      /rootfs/usr/bin/ssh-keyscan \
-      /rootfs/usr/bin/scp \
-      /rootfs/usr/bin/sftp \
-      /rootfs/usr/sbin/tc \
-      /rootfs/usr/sbin/bridge \
-      /rootfs/usr/sbin/devlink \
-      /rootfs/usr/sbin/tipc \
-      /rootfs/usr/sbin/dcb \
-      /rootfs/usr/sbin/vdpa \
-      /rootfs/usr/sbin/genl \
-      /rootfs/usr/sbin/arpd \
-      /rootfs/usr/sbin/rtmon \
-      /rootfs/usr/sbin/rtacct \
-      /rootfs/usr/sbin/iptables-apply \
-      /rootfs/usr/sbin/ip6tables-apply \
-      /rootfs/usr/bin/ss \
-      /rootfs/usr/bin/nstat \
-      /rootfs/usr/bin/lnstat \
-      /rootfs/usr/bin/rdma \
-      /rootfs/usr/bin/routel \
-      /rootfs/usr/bin/rtstat
+# --- iptables: legacy backend only (no nftables/libmnl) - needed for
+# tailscale's netfilter mode.
+ARG IPTABLES_VERSION="1.8.9"
+RUN curl --fail --retry 5 --retry-all-errors -sL "https://www.netfilter.org/pub/iptables/iptables-${IPTABLES_VERSION}.tar.xz" -o /tmp/iptables.tar.xz && \
+    tar -xJ -C /usr/src -f /tmp/iptables.tar.xz && rm /tmp/iptables.tar.xz
+WORKDIR /usr/src/iptables-1.8.9
+RUN CC=${CROSS}gcc ./configure --host=arm-linux-musleabi \
+      --disable-nftables --disable-connlabel --disable-shared --enable-static \
+      LDFLAGS=-static && \
+    make -j"$(nproc)"
 
-# rbash was installed as a full duplicate binary (1.2MB), not the usual symlink to bash.
-RUN rm -f /rootfs/usr/bin/rbash && ln -s bash /rootfs/usr/bin/rbash
+# --- Assemble the rootfs.
+WORKDIR /
+RUN set -e; \
+    mkdir -p /rootfs/bin /rootfs/lib /rootfs/usr/sbin /rootfs/usr/local/bin \
+             /rootfs/etc/dropbear /rootfs/etc/ssl/certs /rootfs/root/.ssh /rootfs/var/run; \
+    cp /usr/src/busybox-1.36.1/busybox /rootfs/bin/busybox; \
+    chroot /rootfs /bin/busybox --install -s /bin; \
+    cp /usr/src/dropbear-2025.88/dropbear /rootfs/usr/sbin/dropbear; \
+    cp /opt/arm-linux-musleabi-cross/arm-linux-musleabi/lib/libc.so /rootfs/lib/ld-musl-arm.so.1; \
+    ln -s ld-musl-arm.so.1 /rootfs/lib/libc.so; \
+    cp /usr/src/iptables-1.8.9/iptables/xtables-legacy-multi /rootfs/usr/sbin/xtables-legacy-multi; \
+    for t in iptables iptables-save iptables-restore ip6tables ip6tables-save ip6tables-restore; do \
+      ln -s xtables-legacy-multi /rootfs/usr/sbin/$t; \
+      ln -s /usr/sbin/$t /rootfs/usr/local/bin/$t; \
+    done
 
-RUN ln -sf /usr/sbin/iptables-legacy /rootfs/usr/local/bin/iptables && \
-    ln -sf /usr/sbin/ip6tables-legacy /rootfs/usr/local/bin/ip6tables
+# Host keys, generated at build time like the other stages.
+RUN cp /usr/src/dropbear-2025.88/dropbearkey /rootfs/usr/sbin/dropbearkey && \
+    chroot /rootfs /usr/sbin/dropbearkey -t rsa -f /etc/dropbear/dropbear_rsa_host_key && \
+    chroot /rootfs /usr/sbin/dropbearkey -t ecdsa -f /etc/dropbear/dropbear_ecdsa_host_key && \
+    chroot /rootfs /usr/sbin/dropbearkey -t ed25519 -f /etc/dropbear/dropbear_ed25519_host_key && \
+    rm /rootfs/usr/sbin/dropbearkey
 
-# openssh-server postinst already generated host keys.
-COPY sshd_config.devuan /rootfs/etc/ssh/sshd_config
+# Minimal user/host db - musl reads /etc/passwd,/etc/shadow,/etc/group
+# directly (no nsswitch). Root's shadow entry starts locked; tailscale.sh
+# sets the real password via chpasswd from $PASSWORD at container start.
+RUN printf 'root:x:0:0:root:/root:/bin/ash\n' > /rootfs/etc/passwd && \
+    printf 'root:!:19000:0:99999:7:::\n' > /rootfs/etc/shadow && \
+    printf 'root:x:0:\n' > /rootfs/etc/group && \
+    printf '127.0.0.1 localhost\n' > /rootfs/etc/hosts && \
+    printf 'export PATH=/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\n' > /rootfs/etc/profile && \
+    chmod 600 /rootfs/etc/shadow
+
+RUN curl -sL https://curl.se/ca/cacert.pem -o /rootfs/etc/ssl/certs/ca-certificates.crt
+
 COPY tailscale.sh /rootfs/usr/local/bin/
 
 FROM scratch AS final-v7
-COPY --from=devuan-rootfs /rootfs/ /
+COPY --from=musl-rootfs /rootfs/ /
 COPY --from=build-env /go/bin/* /usr/local/bin/
 
 EXPOSE 22
