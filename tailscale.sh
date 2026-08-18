@@ -9,6 +9,9 @@ set -m
 
 export PATH=/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
+# /run may not exist in the container rootfs; iptables needs it for xtables.lock
+mkdir -p /run
+
 # Enable IP forwarding
 echo 'net.ipv4.ip_forward = 1' | tee -a /etc/sysctl.conf
 echo 'net.ipv6.conf.all.forwarding = 1' | tee -a /etc/sysctl.conf
